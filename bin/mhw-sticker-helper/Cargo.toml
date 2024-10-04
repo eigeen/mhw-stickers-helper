@@ -1,0 +1,19 @@
+[package]
+name = "mhw-sticker-helper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tex-convert = { path = "../../crates/tex-convert", features = [
+    "tex2dds",
+    "dds2tex",
+] }
+image = { version = "0.25.2", default-features = false, features = ["png"] }
+anyhow = "1.0.89"
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0.128"
+hex = "0.4.3"
+dialoguer = "0.11.0"
+rust-embed = "8.5.0"
+ring = { version = "0.17.8", features = ["std"] }
+zip = { version = "2.2.0", no_default_features = true, features = ["deflate"] }
