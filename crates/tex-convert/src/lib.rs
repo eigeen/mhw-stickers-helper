@@ -28,15 +28,6 @@ pub fn convert_image_to_tex(image: &RgbaImage) -> Result<Vec<u8>, error::Error> 
 
     let dds_data = convert_image_to_dds(image)?;
 
-    // debug
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open("debug.dds")
-        .unwrap();
-    file.write_all(&dds_data).unwrap();
-
     dds2tex::convert_to_tex(&mut Cursor::new(&dds_data))
 }
 
