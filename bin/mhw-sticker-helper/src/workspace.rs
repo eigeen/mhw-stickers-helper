@@ -1,9 +1,7 @@
-use anyhow::Context;
-use image::{DynamicImage, ImageFormat};
+use image::ImageFormat;
 use ring::digest::Digest;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
     io::{BufReader, Cursor, Read, Write},
     path::Path,
@@ -17,14 +15,14 @@ use crate::{asset, util};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceInfo {
     version: i32,
-    stickers: Vec<StickerInfo>,
+    sticker_packs: Vec<StickerPack>,
 }
 
 impl Default for WorkspaceInfo {
     fn default() -> Self {
         Self {
             version: 1,
-            stickers: Default::default(),
+            sticker_packs: Default::default(),
         }
     }
 }
@@ -34,29 +32,15 @@ impl WorkspaceInfo {
         self.version
     }
 
-    pub fn stickers(&self) -> &[StickerInfo] {
-        &self.stickers
-    }
-
-    /// 贴纸包数量
-    pub fn collection_count(&self) -> usize {
-        let stat = self
-            .stickers
-            .iter()
-            .fold(HashSet::new(), |mut stat, sticker| {
-                stat.insert(sticker.collection.clone());
-                stat
-            });
-
-        stat.len()
+    pub fn sticker_packs(&self) -> &[StickerPack] {
+        &self.sticker_packs
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StickerInfo {
-    pub collection: String,
-    pub id: i32,
+pub struct StickerPack {
     pub name: String,
+    pub filename: String,
     pub checksum_sha256: HashString,
 }
 
@@ -105,6 +89,12 @@ impl PartialEq<Digest> for HashString {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StickerPackType {
+    Dds,
+    Png,
+}
+
 /// 工作区
 #[derive(Debug, Clone)]
 pub struct Workspace {
@@ -119,7 +109,10 @@ impl std::fmt::Display for Workspace {
 }
 
 impl Workspace {
-    pub fn create_new<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+    pub fn create_new<P: AsRef<Path>>(
+        path: P,
+        sticker_type: StickerPackType,
+    ) -> anyhow::Result<Self> {
         if path.as_ref().exists() {
             return Err(anyhow::anyhow!(
                 "目录已存在: {}\n请删除该目录或指定其他目录作为工作区目录",
@@ -135,7 +128,7 @@ impl Workspace {
 
         // 创建文件
         std::fs::create_dir_all(&path)?;
-        this.extract_stickers()?;
+        this.extract_stickers(sticker_type)?;
 
         // 写入工作区信息
         this.write_info()?;
@@ -161,7 +154,7 @@ impl Workspace {
     }
 
     /// 解压贴纸到工作区目录，转换为png格式，并更新工作区信息
-    pub fn extract_stickers(&mut self) -> anyhow::Result<()> {
+    pub fn extract_stickers(&mut self, sticker_type: StickerPackType) -> anyhow::Result<()> {
         let output_dir = Path::new(&self.root_path);
 
         for input_name in asset::Asset::iter() {
@@ -171,13 +164,6 @@ impl Workspace {
             let file = asset::Asset::get(&input_name).unwrap();
             let mut reader = Cursor::new(file.data);
 
-            let img = tex_convert::load_tex_image(&mut reader)?;
-            let mut img = DynamicImage::ImageRgba8(img);
-
-            let width = 120;
-            let height = 86;
-            let n_tile = 5;
-
             let input_name_owned = input_name.to_string();
             let input_path = Path::new(&input_name_owned);
             let filestem = input_path
@@ -185,35 +171,44 @@ impl Workspace {
                 .unwrap_or_default()
                 .to_str()
                 .unwrap_or_default();
-            // crop and output
-            for row_index in 0..n_tile {
-                let tile = img.crop(0, row_index * height, width, height);
-                let file_output = output_dir.join(format!("{}_{}.png", filestem, row_index));
+            let file_output_path = match sticker_type {
+                StickerPackType::Dds => output_dir.join(format!("{}.dds", filestem)),
+                StickerPackType::Png => output_dir.join(format!("{}.png", filestem)),
+            };
 
-                let mut data = vec![];
-                let mut writer = Cursor::new(&mut data);
-                tile.write_to(&mut writer, ImageFormat::Png)?;
-
-                let info = Self::parse_sticker_info(&mut Cursor::new(&data), &file_output)?;
-                self.info.stickers.push(info);
-
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .truncate(true)
-                    .write(true)
-                    .open(&file_output)?;
-                file.write_all(&data)?;
+            let mut data = vec![];
+            let mut writer = Cursor::new(&mut data);
+            match sticker_type {
+                StickerPackType::Dds => {
+                    let dds_data = tex_convert::tex2dds::convert_to_dds(&mut reader)?;
+                    data = dds_data;
+                }
+                StickerPackType::Png => {
+                    let img = tex_convert::load_tex_image(&mut reader)?;
+                    img.write_to(&mut writer, ImageFormat::Png)?;
+                }
             }
+
+            // 解析信息
+            let info = Self::parse_sticker_info(&mut Cursor::new(&data), &file_output_path)?;
+            self.info.sticker_packs.push(info);
+            // 写入文件
+            let mut file = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&file_output_path)?;
+            file.write_all(&data)?;
         }
 
         Ok(())
     }
 
     /// 获取工作区中内容变更的贴纸
-    pub fn get_modified_stickers(&self) -> anyhow::Result<Vec<StickerInfo>> {
+    pub fn get_modified_stickers(&self) -> anyhow::Result<Vec<StickerPack>> {
         let mut modified_stickers = vec![];
-        for sticker in &self.info.stickers {
-            let input_path = Path::new(&self.root_path).join(&sticker.name);
+        for sticker in &self.info.sticker_packs {
+            let input_path = Path::new(&self.root_path).join(&sticker.filename);
 
             if !input_path.exists() {
                 continue;
@@ -230,37 +225,6 @@ impl Workspace {
         }
 
         Ok(modified_stickers)
-    }
-
-    /// 获取工作区中内容变更的贴纸包
-    ///
-    /// 贴纸包中至少有一个贴纸发生改变时，导出整个贴纸包
-    pub fn get_modified_collections(&self) -> anyhow::Result<HashMap<String, Vec<StickerInfo>>> {
-        let mut modified_collections: HashMap<String, Vec<StickerInfo>> = HashMap::new();
-        for sticker in &self.info.stickers {
-            if modified_collections.contains_key(&sticker.collection) {
-                continue;
-            }
-            let input_path = Path::new(&self.root_path).join(&sticker.name);
-
-            if !input_path.exists() {
-                continue;
-            }
-            let Ok(file) = File::open(&input_path) else {
-                eprintln!("无法打开文件: {}, 跳过", input_path.display());
-                continue;
-            };
-            let mut reader = BufReader::new(file);
-            let digest = util::sha256_digest(&mut reader)?;
-            if sticker.checksum_sha256 != digest {
-                modified_collections.insert(
-                    sticker.collection.clone(),
-                    self.get_collection(&sticker.collection),
-                );
-            }
-        }
-
-        Ok(modified_collections)
     }
 
     /// 列出当前目录下所有的工作区
@@ -287,16 +251,7 @@ impl Workspace {
         Ok(workspaces)
     }
 
-    fn get_collection(&self, collection_name: &str) -> Vec<StickerInfo> {
-        self.info
-            .stickers
-            .iter()
-            .filter(|s| s.collection == collection_name)
-            .cloned()
-            .collect()
-    }
-
-    fn parse_sticker_info<R, P>(reader: &mut R, path: P) -> anyhow::Result<StickerInfo>
+    fn parse_sticker_info<R, P>(reader: &mut R, path: P) -> anyhow::Result<StickerPack>
     where
         R: Read,
         P: AsRef<Path>,
@@ -304,15 +259,14 @@ impl Workspace {
         let digest = util::sha256_digest(reader)?;
         let hash_string = HashString(digest.as_ref().to_vec());
 
-        let name = path.as_ref().file_stem().unwrap().to_str().unwrap();
-        let Some((collection, id)) = name.rsplit_once('_') else {
-            return Err(anyhow::anyhow!("无法解析贴纸文件名: {}", name));
-        };
-
-        Ok(StickerInfo {
-            collection: collection.to_string(),
-            id: id.parse().context("无法解析贴纸 ID")?,
+        Ok(StickerPack {
             name: path
+                .as_ref()
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+            filename: path
                 .as_ref()
                 .file_name()
                 .unwrap()

@@ -1,8 +1,13 @@
-use std::{collections::HashSet, fmt::Display, fs::OpenOptions, io::Write, path::Path};
+use std::{
+    fmt::Display,
+    fs::OpenOptions,
+    io::{Cursor, Write},
+    path::Path,
+};
 
 use dialoguer::{theme::ColorfulTheme, Input, Select};
-use image::{imageops::FilterType, GenericImageView};
-use workspace::Workspace;
+use image::DynamicImage;
+use workspace::{StickerPackType, Workspace};
 use zip::{write::SimpleFileOptions, ZipWriter};
 
 mod asset;
@@ -63,8 +68,10 @@ impl App {
             .with_prompt("请输入工作区名称： (将会在当前目录下建立工作区目录)")
             .interact_text()?;
 
+        let workspace_mode = WorkspaceModeSelection::show_interact()?;
+
         let path = Path::new(&workspace_name);
-        if let Err(e) = Workspace::create_new(path) {
+        if let Err(e) = Workspace::create_new(path, workspace_mode.into()) {
             eprintln!("创建工作区失败：{}", e);
             return Ok(());
         };
@@ -109,22 +116,13 @@ impl App {
                     println!("工作区信息：");
                     println!("版本：{}", workspace.info().version());
                     println!("路径：{}", workspace.root_path());
-                    println!("贴纸数量：{}", workspace.info().stickers().len());
-                    println!("贴纸包数量：{}", workspace.info().collection_count());
-                    println!("已更改贴纸数量：{}", modified_stickers.len());
-                    let stat =
-                        modified_stickers
-                            .iter()
-                            .fold(HashSet::new(), |mut stat, sticker| {
-                                stat.insert(sticker.collection.clone());
-                                stat
-                            });
-                    println!("已更改贴纸包数量：{}", stat.len());
+                    println!("贴纸包数量：{}", workspace.info().sticker_packs().len());
+                    println!("已更改贴纸包数量：{}", modified_stickers.len());
 
                     if !modified_stickers.is_empty() {
-                        println!("已更改贴纸：");
+                        println!("已更改贴纸包：");
                         for sticker in modified_stickers {
-                            println!("  - {}/{}", sticker.collection, sticker.name);
+                            println!("  - {}/{}", sticker.name, sticker.filename);
                         }
                     }
                 }
@@ -142,8 +140,8 @@ impl App {
     }
 
     fn package_modified_stickers(workspace: &mut Workspace) -> anyhow::Result<()> {
-        let mut modified_collections = workspace.get_modified_collections()?;
-        if modified_collections.is_empty() {
+        let modified_stickers = workspace.get_modified_stickers()?;
+        if modified_stickers.is_empty() {
             eprintln!("没有发现需要打包的贴纸");
             return Ok(());
         }
@@ -161,11 +159,6 @@ impl App {
             std::fs::create_dir_all(&output_dir)?;
         }
 
-        // 按id排序（其实没啥用）
-        modified_collections.iter_mut().for_each(|(_, v)| {
-            v.sort_by_key(|s| s.id);
-        });
-
         // 创建zip文件
         let zip_path = dist_dir.join(format!("{}.zip", workspace_name));
         let zip_file = OpenOptions::new()
@@ -178,34 +171,20 @@ impl App {
 
         let in_zip_file_root = Path::new("nativePC/ui/chat/tex/stamp");
 
-        for (collection, stickers) in modified_collections {
-            let mut merged_img = image::RgbaImage::new(128, 512);
+        for sticker in modified_stickers {
+            let input_path = root_path.join(&sticker.filename);
+            let tex_data = match Path::new(&sticker.filename)
+                .extension()
+                .unwrap()
+                .to_str()
+                .unwrap()
+            {
+                "dds" => Self::convert_dds_sticker_to_tex(&input_path)?,
+                "png" => Self::convert_png_sticker_to_tex(&input_path)?,
+                _ => anyhow::bail!("不支持的文件后缀：{}", sticker.filename),
+            };
 
-            for sticker in stickers {
-                let input_path = root_path.join(&sticker.name);
-                let mut img = image::open(&input_path)?;
-                if img.width() != 120 && img.height() != 86 {
-                    img = img.resize_exact(120, 86, FilterType::Nearest)
-                }
-                // 使用像素复制而不是image库的方法
-                // 解决奇怪的半透明像素白色问题
-                // merged_img.copy_from(&img, 0, img.height() * sticker.id as u32)?;
-                let x_pos = 0;
-                let y_pos = img.height() * sticker.id as u32;
-                for y in 0..img.height() {
-                    for x in 0..img.width() {
-                        let pixel = img.get_pixel(x, y);
-                        merged_img.put_pixel(x_pos + x, y_pos + y, pixel);
-                    }
-                }
-            }
-
-            // debug
-            merged_img.save("debug.png")?;
-
-            // Tex文件数据
-            let tex_data = tex_convert::convert_image_to_tex(&merged_img)?;
-            let file_name = format!("{}.tex", collection);
+            let file_name = format!("{}.tex", sticker.name);
             // 导出独立文件
             let output_path = output_dir.join(&file_name);
             let mut file = OpenOptions::new()
@@ -224,6 +203,32 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn convert_png_sticker_to_tex<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<u8>> {
+        let img = image::open(&path)?;
+        if img.width() != 128 && img.height() != 512 {
+            anyhow::bail!(
+                "贴纸尺寸错误：应为 128x512，实际为 {}x{}",
+                img.width(),
+                img.height()
+            );
+        }
+
+        let DynamicImage::ImageRgba8(img) = img else {
+            anyhow::bail!("贴纸格式错误：应为 RGBA8 (png)，实际为 {:?}", img.color());
+        };
+        // Tex文件数据
+        let tex_data = tex_convert::convert_image_to_tex(&img)?;
+
+        Ok(tex_data)
+    }
+
+    fn convert_dds_sticker_to_tex<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<u8>> {
+        let dds_data = std::fs::read(&path)?;
+        let tex_data = tex_convert::dds2tex::convert_to_tex(&mut Cursor::new(dds_data))?;
+
+        Ok(tex_data)
     }
 }
 
@@ -308,7 +313,54 @@ impl WorkspaceSelection {
             WorkspaceSelection::Back,
         ];
         let selection = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt("请选择操作： (按↑↓选择，Enter确认)")
+            .with_prompt("请选择工作区操作： (按↑↓选择，Enter确认)")
+            .items(selections)
+            .default(0)
+            .interact()?;
+
+        Ok(selection.into())
+    }
+}
+
+#[derive(Debug)]
+enum WorkspaceModeSelection {
+    Dds,
+    Png,
+}
+
+impl Display for WorkspaceModeSelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkspaceModeSelection::Dds => write!(f, ".dds"),
+            WorkspaceModeSelection::Png => write!(f, ".png"),
+        }
+    }
+}
+
+impl From<usize> for WorkspaceModeSelection {
+    fn from(index: usize) -> Self {
+        match index {
+            0 => WorkspaceModeSelection::Dds,
+            1 => WorkspaceModeSelection::Png,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl From<WorkspaceModeSelection> for StickerPackType {
+    fn from(val: WorkspaceModeSelection) -> Self {
+        match val {
+            WorkspaceModeSelection::Dds => StickerPackType::Dds,
+            WorkspaceModeSelection::Png => StickerPackType::Png,
+        }
+    }
+}
+
+impl WorkspaceModeSelection {
+    pub fn show_interact() -> anyhow::Result<Self> {
+        let selections = &[WorkspaceModeSelection::Dds, WorkspaceModeSelection::Png];
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("请选择导出文件格式： (按↑↓选择，Enter确认)\n如果有PS插件，优先选择.dds格式，否则选择.png")
             .items(selections)
             .default(0)
             .interact()?;
