@@ -1,0 +1,9 @@
+[package]
+name = "extract-stickers"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tex-convert = { path = "../../crates/tex-convert", features = ["tex2dds"] }
+image = { version = "0.25.2", default-features = false, features = ["png"] }
+anyhow = "1.0.89"
