@@ -42,6 +42,7 @@ impl App {
     }
 
     pub fn run(&mut self) -> anyhow::Result<()> {
+        println!("MHW 贴纸助手 v{}", env!("CARGO_PKG_VERSION"));
         loop {
             match self.state {
                 AppState::Enter => self.show_main_menu()?,
@@ -169,8 +170,6 @@ impl App {
         let mut zip_writer = ZipWriter::new(zip_file);
         println!("导出 MOD 包：{}", zip_path.display());
 
-        let in_zip_file_root = Path::new("nativePC/ui/chat/tex/stamp");
-
         for sticker in modified_stickers {
             let input_path = root_path.join(&sticker.filename);
             let tex_data = match Path::new(&sticker.filename)
@@ -196,7 +195,7 @@ impl App {
             println!("导出文件：{}", output_path.display());
             // 写入zip文件
             zip_writer.start_file(
-                in_zip_file_root.join(&file_name).to_str().unwrap(),
+                format!("nativePC/ui/chat/tex/stamp/{}", file_name),
                 SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated),
             )?;
             zip_writer.write_all(&tex_data)?;

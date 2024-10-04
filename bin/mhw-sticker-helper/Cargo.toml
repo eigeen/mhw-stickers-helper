@@ -1,6 +1,6 @@
 [package]
 name = "mhw-sticker-helper"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [dependencies]
@@ -17,3 +17,6 @@ dialoguer = "0.11.0"
 rust-embed = "8.5.0"
 ring = { version = "0.17.8", features = ["std"] }
 zip = { version = "2.2.0", no_default_features = true, features = ["deflate"] }
+
+[build-dependencies]
+winres = "0.1"
