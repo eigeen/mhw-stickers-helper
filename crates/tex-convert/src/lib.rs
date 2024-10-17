@@ -4,7 +4,6 @@ use image::RgbaImage;
 use image_dds::ddsfile::AlphaMode;
 
 pub mod error;
-mod intel;
 pub mod spec;
 
 #[cfg(feature = "dds2tex")]
@@ -24,7 +23,7 @@ pub fn load_tex_image<R: Read + Seek>(reader: &mut R) -> Result<RgbaImage, error
 ///
 /// [image::RgbaImage] -> dds -> tex
 pub fn convert_image_to_tex(image: &RgbaImage) -> Result<Vec<u8>, error::Error> {
-    use std::io::{Cursor, Write};
+    use std::io::Cursor;
 
     let dds_data = convert_image_to_dds(image)?;
 
